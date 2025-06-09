@@ -7,27 +7,31 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const pie = b.option(bool, "pie", "Build with PIE support (by default false)") orelse false;
+    const pie = b.option(bool, "pie", "Build with PIE support (by default: target-dependant)");
     const strip = b.option(bool, "strip", "Strip debugging info (by default false)") orelse false;
 
-    const exe = b.addExecutable(.{
-        .name = "ncdu",
+    const main_mod = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
         .strip = strip,
         .link_libc = true,
     });
+    main_mod.linkSystemLibrary("ncursesw", .{});
+    main_mod.linkSystemLibrary("zstd", .{});
 
+    const exe = b.addExecutable(.{
+        .name = "ncdu",
+        .root_module = main_mod,
+    });
     exe.pie = pie;
-    exe.root_module.linkSystemLibrary("ncursesw", .{});
-    exe.root_module.linkSystemLibrary("libzstd", .{});
     // https://github.com/ziglang/zig/blob/faccd79ca5debbe22fe168193b8de54393257604/build.zig#L745-L748
     if (target.result.os.tag.isDarwin()) {
         // useful for package maintainers
         exe.headerpad_max_install_names = true;
     }
     b.installArtifact(exe);
+    // exe.addLibraryPath(.{ .cwd_relative = "/lib/x86_64-linux-gnu" });
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
@@ -39,14 +43,9 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
+        .root_module = main_mod,
     });
     unit_tests.pie = pie;
-    unit_tests.root_module.linkSystemLibrary("ncursesw", .{});
-    unit_tests.root_module.linkSystemLibrary("libzstd", .{});
 
     const run_unit_tests = b.addRunArtifact(unit_tests);
 

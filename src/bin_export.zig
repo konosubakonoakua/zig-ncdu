@@ -17,8 +17,6 @@ pub const global = struct {
     var root_itemref: u64 = 0;
 };
 
-const BLOCK_SIZE: usize = 64*1024;
-
 pub const SIGNATURE = "\xbfncduEX1";
 
 pub const ItemKey = enum(u5) {
@@ -81,10 +79,15 @@ fn blockSize(num: u32) usize {
       else                     2048<<10; // 32768
 }
 
+// Upper bound on the return value of blockSize()
+// (config.export_block_size may be larger than the sizes listed above, let's
+// stick with the maximum block size supported by the file format to be safe)
+const MAX_BLOCK_SIZE: usize = 1<<28;
+
 
 pub const Thread = struct {
     buf: []u8 = undefined,
-    off: usize = std.math.maxInt(usize) - (1<<10), // large number to trigger a flush() for the first write
+    off: usize = MAX_BLOCK_SIZE, // pretend we have a full block to trigger a flush() for the first write
     block_num: u32 = std.math.maxInt(u32),
     itemref: u64 = 0, // ref of item currently being written
 
@@ -124,7 +127,7 @@ pub const Thread = struct {
 
         global.lock.lock();
         defer global.lock.unlock();
-        // This can only really happen when the root path exceeds BLOCK_SIZE,
+        // This can only really happen when the root path exceeds our block size,
         // in which case we would probably have error'ed out earlier anyway.
         if (expected_len > t.buf.len) ui.die("Error writing data: path too long.\n", .{});
 
@@ -430,7 +433,7 @@ pub const Dir = struct {
 
 pub fn createRoot(stat: *const sink.Stat, threads: []sink.Thread) Dir {
     for (threads) |*t| {
-        t.sink.bin.buf = main.allocator.alloc(u8, BLOCK_SIZE) catch unreachable;
+        t.sink.bin.buf = main.allocator.alloc(u8, blockSize(0)) catch unreachable;
     }
 
     return .{ .stat = stat.* };

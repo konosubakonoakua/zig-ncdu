@@ -1,6 +1,6 @@
 .\" SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 .\" SPDX-License-Identifier: MIT
-.Dd November 19, 2024
+.Dd May 1, 2025
 .Dt NCDU 1
 .Os
 .Sh NAME
@@ -286,7 +286,7 @@ when given twice it will also add
 thus ensuring that there is no way to modify the file system from within
 .Nm .
 .It Fl \-si , \-no\-si
-List sizes using base 10 prefixes, that is, powers of 1000 (KB, MB, etc), as
+List sizes using base 10 prefixes, that is, powers of 1000 (kB, MB, etc), as
 defined in the International System of Units (SI), instead of the usual base 2
 prefixes (KiB, MiB, etc).
 .It Fl \-disk\-usage , \-apparent\-size
@@ -392,6 +392,7 @@ is given on the command line.
 .Pp
 The configuration file format is simply one command line option per line.
 Lines starting with '#' are ignored.
+A line can be prefixed with '@' to suppress errors while parsing the option.
 Example configuration file:
 .Bd -literal -offset indent
 # Always enable extended mode
@@ -402,6 +403,9 @@ Example configuration file:
 
 # Exclude .git directories
 \-\-exclude .git
+
+# Read excludes from ~/.ncduexcludes, ignore error if the file does not exist
+@--exclude-from ~/.ncduexcludes
 .Ed
 .
 .Sh KEYS

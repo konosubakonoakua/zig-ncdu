@@ -47,13 +47,23 @@ fn truncate(comptime T: type, comptime field: anytype, x: anytype) std.meta.fiel
 
 
 fn statAt(parent: std.fs.Dir, name: [:0]const u8, follow: bool, symlink: *bool) !sink.Stat {
-    const stat = try std.posix.fstatatZ(parent.fd, name, if (follow) 0 else std.posix.AT.SYMLINK_NOFOLLOW);
-    symlink.* = std.posix.S.ISLNK(stat.mode);
+    // std.posix.fstatatZ() in Zig 0.14 is not suitable due to https://github.com/ziglang/zig/issues/23463
+    var stat: std.c.Stat = undefined;
+    if (std.c.fstatat(parent.fd, name, &stat, if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW) != 0) {
+        return switch (std.c._errno().*) {
+            @intFromEnum(std.c.E.NOENT) => error.FileNotFound,
+            @intFromEnum(std.c.E.NAMETOOLONG) => error.NameTooLong,
+            @intFromEnum(std.c.E.NOMEM) => error.OutOfMemory,
+            @intFromEnum(std.c.E.ACCES) => error.AccessDenied,
+            else => error.Unexpected,
+        };
+    }
+    symlink.* = std.c.S.ISLNK(stat.mode);
     return sink.Stat{
         .etype =
-            if (std.posix.S.ISDIR(stat.mode)) .dir
+            if (std.c.S.ISDIR(stat.mode)) .dir
             else if (stat.nlink > 1) .link
-            else if (!std.posix.S.ISREG(stat.mode)) .nonreg
+            else if (!std.c.S.ISREG(stat.mode)) .nonreg
             else .reg,
         .blocks = clamp(sink.Stat, .blocks, stat.blocks),
         .size = clamp(sink.Stat, .size, stat.size),
