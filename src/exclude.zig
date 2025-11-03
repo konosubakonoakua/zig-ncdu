@@ -123,7 +123,7 @@ test "parse" {
 fn PatternList(comptime withsub: bool) type {
     return struct {
         literals: std.HashMapUnmanaged(*const Pattern, Val, Ctx, 80) = .{},
-        wild: std.ArrayListUnmanaged(*const Pattern) = .{},
+        wild: std.ArrayListUnmanaged(*const Pattern) = .empty,
 
         // Not a fan of the map-of-arrays approach in the 'withsub' case, it
         // has a lot of extra allocations. Linking the Patterns together in a

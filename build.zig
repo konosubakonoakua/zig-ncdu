@@ -31,7 +31,6 @@ pub fn build(b: *std.Build) void {
         exe.headerpad_max_install_names = true;
     }
     b.installArtifact(exe);
-    // exe.addLibraryPath(.{ .cwd_relative = "/lib/x86_64-linux-gnu" });
 
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());

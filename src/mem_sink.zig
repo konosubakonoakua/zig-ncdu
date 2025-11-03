@@ -17,6 +17,24 @@ pub const Thread = struct {
     arena: std.heap.ArenaAllocator = std.heap.ArenaAllocator.init(std.heap.page_allocator),
 };
 
+pub fn statToEntry(stat: *const sink.Stat, e: *model.Entry, parent: *model.Dir) void {
+    e.pack.blocks = stat.blocks;
+    e.size = stat.size;
+    if (e.dir()) |d| {
+        d.parent = parent;
+        d.pack.dev = model.devices.getId(stat.dev);
+    }
+    if (e.link()) |l| {
+        l.parent = parent;
+        l.ino = stat.ino;
+        l.pack.nlink = stat.nlink;
+        model.inodes.lock.lock();
+        defer model.inodes.lock.unlock();
+        l.addLink();
+    }
+    if (e.ext()) |ext| ext.* = stat.ext;
+}
+
 pub const Dir = struct {
     dir: *model.Dir,
     entries: Map,
@@ -107,21 +125,7 @@ pub const Dir = struct {
         }
 
         const e = self.getEntry(t, stat.etype, main.config.extended and !stat.ext.isEmpty(), name);
-        e.pack.blocks = stat.blocks;
-        e.size = stat.size;
-        if (e.dir()) |d| {
-            d.parent = self.dir;
-            d.pack.dev = model.devices.getId(stat.dev);
-        }
-        if (e.link()) |l| {
-            l.parent = self.dir;
-            l.ino = stat.ino;
-            l.pack.nlink = stat.nlink;
-            model.inodes.lock.lock();
-            defer model.inodes.lock.unlock();
-            l.addLink();
-        }
-        if (e.ext()) |ext| ext.* = stat.ext;
+        statToEntry(stat, e, self.dir);
         return e;
     }
 

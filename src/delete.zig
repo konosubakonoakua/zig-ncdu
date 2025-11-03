@@ -6,6 +6,9 @@ const main = @import("main.zig");
 const model = @import("model.zig");
 const ui = @import("ui.zig");
 const browser = @import("browser.zig");
+const scan = @import("scan.zig");
+const sink = @import("sink.zig");
+const mem_sink = @import("mem_sink.zig");
 const util = @import("util.zig");
 const c = @import("c.zig").c;
 
@@ -68,6 +71,57 @@ fn deleteItem(dir: std.fs.Dir, path: [:0]const u8, ptr: *align(1) ?*model.Entry)
     return false;
 }
 
+// Returns true if the item has been deleted successfully.
+fn deleteCmd(path: [:0]const u8, ptr: *align(1) ?*model.Entry) bool {
+    {
+        var env = std.process.getEnvMap(main.allocator) catch unreachable;
+        defer env.deinit();
+        env.put("NCDU_DELETE_PATH", path) catch unreachable;
+
+        // Since we're passing the path as an environment variable and go through
+        // the shell anyway, we can refer to the variable and avoid error-prone
+        // shell escaping.
+        const cmd = std.fmt.allocPrint(main.allocator, "{s} \"$NCDU_DELETE_PATH\"", .{main.config.delete_command}) catch unreachable;
+        defer main.allocator.free(cmd);
+        ui.runCmd(&.{"/bin/sh", "-c", cmd}, null, &env, true);
+    }
+
+    const stat = scan.statAt(std.fs.cwd(), path, false, null) catch {
+        // Stat failed. Would be nice to display an error if it's not
+        // 'FileNotFound', but w/e, let's just assume the item has been
+        // deleted as expected.
+        ptr.*.?.zeroStats(parent);
+        ptr.* = ptr.*.?.next.ptr;
+        return true;
+    };
+
+    // If either old or new entry is not a dir, remove & re-add entry in the in-memory tree.
+    if (ptr.*.?.pack.etype != .dir or stat.etype != .dir) {
+        ptr.*.?.zeroStats(parent);
+        const e = model.Entry.create(main.allocator, stat.etype, main.config.extended and !stat.ext.isEmpty(), ptr.*.?.name());
+        e.next.ptr = ptr.*.?.next.ptr;
+        mem_sink.statToEntry(&stat, e, parent);
+        ptr.* = e;
+
+        var it : ?*model.Dir = parent;
+        while (it) |p| : (it = p.parent) {
+            if (stat.etype != .link) {
+                p.entry.pack.blocks +|= e.pack.blocks;
+                p.entry.size +|= e.size;
+            }
+            p.items +|= 1;
+        }
+    }
+
+    // If new entry is a dir, recursively scan.
+    if (ptr.*.?.dir()) |d| {
+        main.state = .refresh;
+        sink.global.sink = .mem;
+        mem_sink.global.root = d;
+    }
+    return false;
+}
+
 // Returns the item that should be selected in the browser.
 pub fn delete() ?*model.Entry {
     while (main.state == .delete and state == .confirm)
@@ -82,30 +136,46 @@ pub fn delete() ?*model.Entry {
         if (it.* == entry)
             break;
 
-    var path = std.ArrayList(u8).init(main.allocator);
-    defer path.deinit();
-    parent.fmtPath(true, &path);
+    var path: std.ArrayListUnmanaged(u8) = .empty;
+    defer path.deinit(main.allocator);
+    parent.fmtPath(main.allocator, true, &path);
     if (path.items.len == 0 or path.items[path.items.len-1] != '/')
-        path.append('/') catch unreachable;
-    path.appendSlice(entry.name()) catch unreachable;
+        path.append(main.allocator, '/') catch unreachable;
+    path.appendSlice(main.allocator, entry.name()) catch unreachable;
 
-    _ = deleteItem(std.fs.cwd(), util.arrayListBufZ(&path), it);
-    model.inodes.addAllStats();
-    return if (it.* == e) e else next_sel;
+    if (main.config.delete_command.len == 0) {
+        _ = deleteItem(std.fs.cwd(), util.arrayListBufZ(&path, main.allocator), it);
+        model.inodes.addAllStats();
+        return if (it.* == e) e else next_sel;
+    } else {
+        const isdel = deleteCmd(util.arrayListBufZ(&path, main.allocator), it);
+        model.inodes.addAllStats();
+        return if (isdel) next_sel else it.*;
+    }
 }
 
 fn drawConfirm() void {
     browser.draw();
     const box = ui.Box.create(6, 60, "Confirm delete");
     box.move(1, 2);
-    ui.addstr("Are you sure you want to delete \"");
-    ui.addstr(ui.shorten(ui.toUtf8(entry.name()), 21));
-    ui.addch('"');
-    if (entry.pack.etype != .dir)
-        ui.addch('?')
-    else {
-        box.move(2, 18);
-        ui.addstr("and all of its contents?");
+    if (main.config.delete_command.len == 0) {
+        ui.addstr("Are you sure you want to delete \"");
+        ui.addstr(ui.shorten(ui.toUtf8(entry.name()), 21));
+        ui.addch('"');
+        if (entry.pack.etype != .dir)
+            ui.addch('?')
+        else {
+            box.move(2, 18);
+            ui.addstr("and all of its contents?");
+        }
+    } else {
+        ui.addstr("Are you sure you want to run \"");
+        ui.addstr(ui.shorten(ui.toUtf8(main.config.delete_command), 25));
+        ui.addch('"');
+        box.move(2, 4);
+        ui.addstr("on \"");
+        ui.addstr(ui.shorten(ui.toUtf8(entry.name()), 50));
+        ui.addch('"');
     }
 
     box.move(4, 15);
@@ -119,20 +189,25 @@ fn drawConfirm() void {
     box.move(4, 31);
     ui.style(if (confirm == .ignore) .sel else .default);
     ui.addstr("don't ask me again");
+    box.move(4, switch (confirm) {
+        .yes    => 15,
+        .no     => 25,
+        .ignore => 31
+    });
 }
 
 fn drawProgress() void {
-    var path = std.ArrayList(u8).init(main.allocator);
-    defer path.deinit();
-    parent.fmtPath(false, &path);
-    path.append('/') catch unreachable;
-    path.appendSlice(entry.name()) catch unreachable;
+    var path: std.ArrayListUnmanaged(u8) = .empty;
+    defer path.deinit(main.allocator);
+    parent.fmtPath(main.allocator, false, &path);
+    path.append(main.allocator, '/') catch unreachable;
+    path.appendSlice(main.allocator, entry.name()) catch unreachable;
 
     // TODO: Item counts and progress bar would be nice.
 
     const box = ui.Box.create(6, 60, "Deleting...");
     box.move(2, 2);
-    ui.addstr(ui.shorten(ui.toUtf8(util.arrayListBufZ(&path)), 56));
+    ui.addstr(ui.shorten(ui.toUtf8(util.arrayListBufZ(&path, main.allocator)), 56));
     box.move(4, 41);
     ui.addstr("Press ");
     ui.style(.key);
@@ -142,16 +217,16 @@ fn drawProgress() void {
 }
 
 fn drawErr() void {
-    var path = std.ArrayList(u8).init(main.allocator);
-    defer path.deinit();
-    parent.fmtPath(false, &path);
-    path.append('/') catch unreachable;
-    path.appendSlice(entry.name()) catch unreachable;
+    var path: std.ArrayListUnmanaged(u8) = .empty;
+    defer path.deinit(main.allocator);
+    parent.fmtPath(main.allocator, false, &path);
+    path.append(main.allocator, '/') catch unreachable;
+    path.appendSlice(main.allocator, entry.name()) catch unreachable;
 
     const box = ui.Box.create(6, 60, "Error");
     box.move(1, 2);
     ui.addstr("Error deleting ");
-    ui.addstr(ui.shorten(ui.toUtf8(util.arrayListBufZ(&path)), 41));
+    ui.addstr(ui.shorten(ui.toUtf8(util.arrayListBufZ(&path, main.allocator)), 41));
     box.move(2, 4);
     ui.addstr(ui.errorString(error_code));
 

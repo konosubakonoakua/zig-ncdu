@@ -46,7 +46,7 @@ fn truncate(comptime T: type, comptime field: anytype, x: anytype) std.meta.fiel
 }
 
 
-fn statAt(parent: std.fs.Dir, name: [:0]const u8, follow: bool, symlink: *bool) !sink.Stat {
+pub fn statAt(parent: std.fs.Dir, name: [:0]const u8, follow: bool, symlink: ?*bool) !sink.Stat {
     // std.posix.fstatatZ() in Zig 0.14 is not suitable due to https://github.com/ziglang/zig/issues/23463
     var stat: std.c.Stat = undefined;
     if (std.c.fstatat(parent.fd, name, &stat, if (follow) 0 else std.c.AT.SYMLINK_NOFOLLOW) != 0) {
@@ -58,7 +58,7 @@ fn statAt(parent: std.fs.Dir, name: [:0]const u8, follow: bool, symlink: *bool) 
             else => error.Unexpected,
         };
     }
-    symlink.* = std.c.S.ISLNK(stat.mode);
+    if (symlink) |s| s.* = std.c.S.ISLNK(stat.mode);
     return sink.Stat{
         .etype =
             if (std.c.S.ISDIR(stat.mode)) .dir
@@ -91,7 +91,7 @@ fn isCacheDir(dir: std.fs.Dir) bool {
     const f = dir.openFileZ("CACHEDIR.TAG", .{}) catch return false;
     defer f.close();
     var buf: [sig.len]u8 = undefined;
-    const len = f.reader().readAll(&buf) catch return false;
+    const len = f.readAll(&buf) catch return false;
     return len == sig.len and std.mem.eql(u8, &buf, sig);
 }
 
@@ -184,7 +184,7 @@ const Thread = struct {
     thread_num: usize,
     sink: *sink.Thread,
     state: *State,
-    stack: std.ArrayList(*Dir) = std.ArrayList(*Dir).init(main.allocator),
+    stack: std.ArrayListUnmanaged(*Dir) = .empty,
     thread: std.Thread = undefined,
     namebuf: [4096]u8 = undefined,
 
@@ -265,13 +265,13 @@ const Thread = struct {
         const s = dir.sink.addDir(t.sink, name, &stat);
         const ndir = Dir.create(edir, stat.dev, dir.pat.enter(name), s);
         if (main.config.threads == 1 or !t.state.tryPush(ndir))
-            t.stack.append(ndir) catch unreachable;
+            t.stack.append(main.allocator, ndir) catch unreachable;
     }
 
     fn run(t: *Thread) void {
-        defer t.stack.deinit();
+        defer t.stack.deinit(main.allocator);
         while (t.state.waitPop()) |dir| {
-            t.stack.append(dir) catch unreachable;
+            t.stack.append(main.allocator, dir) catch unreachable;
 
             while (t.stack.items.len > 0) {
                 const d = t.stack.items[t.stack.items.len - 1];

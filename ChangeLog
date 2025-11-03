@@ -1,6 +1,21 @@
 # SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 # SPDX-License-Identifier: MIT
 
+2.9.2 - 2025-10-24
+	- Still requires Zig 0.14 or 0.15
+	- Fix hang on loading config file when compiled with Zig 0.15.2
+
+2.9.1 - 2025-08-21
+	- Add support for building with Zig 0.15
+	- Zig 0.14 is still supported
+
+2.9 - 2025-08-16
+	- Still requires Zig 0.14
+	- Add --delete-command option to replace the built-in file deletion
+	- Move term cursor to selected option in delete confirmation window
+	- Support binary import on older Linux kernels lacking statx() (may break
+	  again in the future, Zig does not officially support such old kernels)
+
 2.8.2 - 2025-05-01
 	- Still requires Zig 0.14
 	- Fix a build error on MacOS

@@ -11,7 +11,7 @@ const c = @import("c.zig").c;
 
 pub const global = struct {
     var fd: std.fs.File = undefined;
-    var index = std.ArrayList(u8).init(main.allocator);
+    var index: std.ArrayListUnmanaged(u8) = .empty;
     var file_off: u64 = 0;
     var lock: std.Thread.Mutex = .{};
     var root_itemref: u64 = 0;
@@ -105,11 +105,11 @@ pub const Thread = struct {
         }
     }
 
-    fn createBlock(t: *Thread) std.ArrayList(u8) {
-        var out = std.ArrayList(u8).init(main.allocator);
+    fn createBlock(t: *Thread) std.ArrayListUnmanaged(u8) {
+        var out: std.ArrayListUnmanaged(u8) = .empty;
         if (t.block_num == std.math.maxInt(u32) or t.off == 0) return out;
 
-        out.ensureTotalCapacityPrecise(12 + @as(usize, @intCast(c.ZSTD_COMPRESSBOUND(@as(c_int, @intCast(t.off)))))) catch unreachable;
+        out.ensureTotalCapacityPrecise(main.allocator, 12 + @as(usize, @intCast(c.ZSTD_COMPRESSBOUND(@as(c_int, @intCast(t.off)))))) catch unreachable;
         out.items.len = out.capacity;
         const bodylen = compressZstd(t.buf[0..t.off], out.items[8..]);
         out.items.len = 12 + bodylen;
@@ -122,8 +122,8 @@ pub const Thread = struct {
 
     fn flush(t: *Thread, expected_len: usize) void {
         @branchHint(.unlikely);
-        const block = createBlock(t);
-        defer block.deinit();
+        var block = createBlock(t);
+        defer block.deinit(main.allocator);
 
         global.lock.lock();
         defer global.lock.unlock();
@@ -141,7 +141,7 @@ pub const Thread = struct {
 
         t.off = 0;
         t.block_num = @intCast((global.index.items.len - 4) / 8);
-        global.index.appendSlice(&[1]u8{0}**8) catch unreachable;
+        global.index.appendSlice(main.allocator, &[1]u8{0}**8) catch unreachable;
         if (global.index.items.len + 12 >= (1<<28)) ui.die("Too many data blocks, please report a bug.\n", .{});
 
         const newsize = blockSize(t.block_num);
@@ -447,12 +447,12 @@ pub fn done(threads: []sink.Thread) void {
 
     while (std.mem.endsWith(u8, global.index.items, &[1]u8{0}**8))
         global.index.shrinkRetainingCapacity(global.index.items.len - 8);
-    global.index.appendSlice(&bigu64(global.root_itemref)) catch unreachable;
-    global.index.appendSlice(&blockHeader(1, @intCast(global.index.items.len + 4))) catch unreachable;
+    global.index.appendSlice(main.allocator, &bigu64(global.root_itemref)) catch unreachable;
+    global.index.appendSlice(main.allocator, &blockHeader(1, @intCast(global.index.items.len + 4))) catch unreachable;
     global.index.items[0..4].* = blockHeader(1, @intCast(global.index.items.len));
     global.fd.writeAll(global.index.items) catch |e|
         ui.die("Error writing to file: {s}.\n", .{ ui.errorString(e) });
-    global.index.clearAndFree();
+    global.index.clearAndFree(main.allocator);
 
     global.fd.close();
 }
@@ -464,5 +464,5 @@ pub fn setupOutput(fd: std.fs.File) void {
     global.file_off = 8;
 
     // Placeholder for the index block header.
-    global.index.appendSlice("aaaa") catch unreachable;
+    global.index.appendSlice(main.allocator, "aaaa") catch unreachable;
 }

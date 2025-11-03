@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
-pub const program_version = "2.8.2";
+pub const program_version = "2.9.2";
 
 const std = @import("std");
 const model = @import("model.zig");
@@ -80,7 +80,6 @@ pub const config = struct {
     pub var follow_symlinks: bool = false;
     pub var exclude_caches: bool = false;
     pub var exclude_kernfs: bool = false;
-    pub var exclude_patterns: std.ArrayList([:0]const u8) = std.ArrayList([:0]const u8).init(allocator);
     pub var threads: usize = 1;
     pub var complevel: u8 = 4;
     pub var compress: bool = false;
@@ -114,9 +113,13 @@ pub const config = struct {
     pub var confirm_quit: bool = false;
     pub var confirm_delete: bool = true;
     pub var ignore_delete_errors: bool = false;
+    pub var delete_command: [:0]const u8 = "";
 };
 
 pub var state: enum { scan, browse, refresh, shell, delete } = .scan;
+
+const stdin = if (@hasDecl(std.io, "getStdIn")) std.io.getStdIn() else std.fs.File.stdin();
+const stdout = if (@hasDecl(std.io, "getStdOut")) std.io.getStdOut() else std.fs.File.stdout();
 
 // Simple generic argument parser, supports getopt_long() style arguments.
 const Args = struct {
@@ -306,6 +309,7 @@ fn argConfig(args: *Args, opt: Args.Option, infile: bool) !void {
     else if (opt.is("--no-confirm-quit")) config.confirm_quit = false
     else if (opt.is("--confirm-delete")) config.confirm_delete = true
     else if (opt.is("--no-confirm-delete")) config.confirm_delete = false
+    else if (opt.is("--delete-command")) config.delete_command = allocator.dupeZ(u8, try args.arg()) catch unreachable
     else if (opt.is("--color")) {
         const val = try args.arg();
         if (std.mem.eql(u8, val, "off")) config.ui_color = .off
@@ -326,19 +330,13 @@ fn tryReadArgsFile(path: [:0]const u8) void {
     };
     defer f.close();
 
-    var rd_ = std.io.bufferedReader(f.reader());
-    const rd = rd_.reader();
-
     var line_buf: [4096]u8 = undefined;
-    var line_fbs = std.io.fixedBufferStream(&line_buf);
-    const line_writer = line_fbs.writer();
+    var line_rd = util.LineReader.init(f, &line_buf);
 
-    while (true) : (line_fbs.reset()) {
-        rd.streamUntilDelimiter(line_writer, '\n', line_buf.len) catch |err| switch (err) {
-            error.EndOfStream => if (line_fbs.getPos() catch unreachable == 0) break,
-            else => |e| ui.die("Error reading from {s}: {s}\nRun with --ignore-config to skip reading config files.\n", .{ path, ui.errorString(e) }),
-        };
-        const line_ = line_fbs.getWritten();
+    while (true) {
+        const line_ = (line_rd.read() catch |e|
+            ui.die("Error reading from {s}: {s}\nRun with --ignore-config to skip reading config files.\n", .{ path, ui.errorString(e) })
+        ) orelse break;
 
         var argc: usize = 0;
         var ignerror = false;
@@ -373,13 +371,11 @@ fn tryReadArgsFile(path: [:0]const u8) void {
 }
 
 fn version() noreturn {
-    const stdout = std.io.getStdOut();
     stdout.writeAll("ncdu " ++ program_version ++ "\n") catch {};
     std.process.exit(0);
 }
 
 fn help() noreturn {
-    const stdout = std.io.getStdOut();
     stdout.writeAll(
     \\ncdu <options> <directory>
     \\
@@ -428,6 +424,7 @@ fn help() noreturn {
     \\  --group-directories-first  Sort directories before files
     \\  --confirm-quit             Ask confirmation before quitting ncdu
     \\  --no-confirm-delete        Don't ask confirmation before deletion
+    \\  --delete-command CMD       Command to run for file deletion
     \\  --color SCHEME             off / dark / dark-bg
     \\
     \\Refer to `man ncdu` for more information.
@@ -437,75 +434,13 @@ fn help() noreturn {
 }
 
 
-fn spawnShell() void {
-    ui.deinit();
-    defer ui.init();
-
-    var env = std.process.getEnvMap(allocator) catch unreachable;
-    defer env.deinit();
-    // NCDU_LEVEL can only count to 9, keeps the implementation simple.
-    if (env.get("NCDU_LEVEL")) |l|
-        env.put("NCDU_LEVEL", if (l.len == 0) "1" else switch (l[0]) {
-            '0'...'8' => |d| &[1] u8{d+1},
-            '9' => "9",
-            else => "1"
-        }) catch unreachable
-    else
-        env.put("NCDU_LEVEL", "1") catch unreachable;
-
-    const shell = std.posix.getenvZ("NCDU_SHELL") orelse std.posix.getenvZ("SHELL") orelse "/bin/sh";
-    var child = std.process.Child.init(&.{shell}, allocator);
-    child.cwd = browser.dir_path;
-    child.env_map = &env;
-
-    const stdin = std.io.getStdIn();
-    const stderr = std.io.getStdErr();
-    const term = child.spawnAndWait() catch |e| blk: {
-        stderr.writer().print(
-            "Error spawning shell: {s}\n\nPress enter to continue.\n",
-            .{ ui.errorString(e) }
-        ) catch {};
-        stdin.reader().skipUntilDelimiterOrEof('\n') catch unreachable;
-        break :blk std.process.Child.Term{ .Exited = 0 };
-    };
-    if (term != .Exited) {
-        const n = switch (term) {
-            .Exited  => "status",
-            .Signal  => "signal",
-            .Stopped => "stopped",
-            .Unknown => "unknown",
-        };
-        const v = switch (term) {
-            .Exited  => |v| v,
-            .Signal  => |v| v,
-            .Stopped => |v| v,
-            .Unknown => |v| v,
-        };
-        stderr.writer().print(
-            "Shell returned with {s} code {}.\n\nPress enter to continue.\n", .{ n, v }
-        ) catch {};
-        stdin.reader().skipUntilDelimiterOrEof('\n') catch unreachable;
-    }
-}
-
-
 fn readExcludeFile(path: [:0]const u8) !void {
     const f = try std.fs.cwd().openFileZ(path, .{});
     defer f.close();
 
-    var rd_ = std.io.bufferedReader(f.reader());
-    const rd = rd_.reader();
-
     var line_buf: [4096]u8 = undefined;
-    var line_fbs = std.io.fixedBufferStream(&line_buf);
-    const line_writer = line_fbs.writer();
-
-    while (true) : (line_fbs.reset()) {
-        rd.streamUntilDelimiter(line_writer, '\n', line_buf.len) catch |err| switch (err) {
-            error.EndOfStream => if (line_fbs.getPos() catch unreachable == 0) break,
-            else => |e| return e,
-        };
-        const line = line_fbs.getWritten();
+    var line_rd = util.LineReader.init(f, &line_buf);
+    while (try line_rd.read()) |line| {
         if (line.len > 0)
             exclude.addPattern(line);
     }
@@ -513,12 +448,12 @@ fn readExcludeFile(path: [:0]const u8) !void {
 
 fn readImport(path: [:0]const u8) !void {
     const fd =
-        if (std.mem.eql(u8, "-", path)) std.io.getStdIn()
+        if (std.mem.eql(u8, "-", path)) stdin
         else try std.fs.cwd().openFileZ(path, .{});
     errdefer fd.close();
 
     var buf: [8]u8 = undefined;
-    try fd.reader().readNoEof(&buf);
+    if (8 != try fd.readAll(&buf)) return error.EndOfStream;
     if (std.mem.eql(u8, &buf, bin_export.SIGNATURE)) {
         try bin_reader.open(fd);
         config.binreader = true;
@@ -600,8 +535,6 @@ pub fn main() void {
     if (@import("builtin").os.tag != .linux and config.exclude_kernfs)
         ui.die("The --exclude-kernfs flag is currently only supported on Linux.\n", .{});
 
-    const stdin = std.io.getStdIn();
-    const stdout = std.io.getStdOut();
     const out_tty = stdout.isTty();
     const in_tty = stdin.isTty();
     if (config.scan_ui == null) {
@@ -659,10 +592,10 @@ pub fn main() void {
     while (true) {
         switch (state) {
             .refresh => {
-                var full_path = std.ArrayList(u8).init(allocator);
-                defer full_path.deinit();
-                mem_sink.global.root.?.fmtPath(true, &full_path);
-                scan.scan(util.arrayListBufZ(&full_path)) catch {
+                var full_path: std.ArrayListUnmanaged(u8) = .empty;
+                defer full_path.deinit(allocator);
+                mem_sink.global.root.?.fmtPath(allocator, true, &full_path);
+                scan.scan(util.arrayListBufZ(&full_path, allocator)) catch {
                     sink.global.last_error = allocator.dupeZ(u8, full_path.items) catch unreachable;
                     sink.global.state = .err;
                     while (state == .refresh) handleEvent(true, true);
@@ -671,13 +604,18 @@ pub fn main() void {
                 browser.loadDir(0);
             },
             .shell => {
-                spawnShell();
+                const shell = std.posix.getenvZ("NCDU_SHELL") orelse std.posix.getenvZ("SHELL") orelse "/bin/sh";
+                var env = std.process.getEnvMap(allocator) catch unreachable;
+                defer env.deinit();
+                ui.runCmd(&.{shell}, browser.dir_path, &env, false);
                 state = .browse;
             },
             .delete => {
                 const next = delete.delete();
-                state = .browse;
-                browser.loadDir(if (next) |n| n.nameHash() else 0);
+                if (state != .refresh) {
+                    state = .browse;
+                    browser.loadDir(if (next) |n| n.nameHash() else 0);
+                }
             },
             else => handleEvent(true, false)
         }

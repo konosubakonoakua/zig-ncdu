@@ -32,8 +32,8 @@ pub fn blocksToSize(b: u64) u64 {
 // Ensure the given arraylist buffer gets zero-terminated and returns a slice
 // into the buffer. The returned buffer is invalidated whenever the arraylist
 // is freed or written to.
-pub fn arrayListBufZ(buf: *std.ArrayList(u8)) [:0]const u8 {
-    buf.append(0) catch unreachable;
+pub fn arrayListBufZ(buf: *std.ArrayListUnmanaged(u8), alloc: std.mem.Allocator) [:0]const u8 {
+    buf.append(alloc, 0) catch unreachable;
     defer buf.items.len -= 1;
     return buf.items[0..buf.items.len-1:0];
 }
@@ -196,5 +196,54 @@ pub fn expanduser(path: []const u8, alloc: std.mem.Allocator) ![:0]u8 {
     const home = std.mem.trimRight(u8, home_raw, "/");
 
     if (home.len == 0 and path.len == len) return alloc.dupeZ(u8, "/");
-    return try std.fmt.allocPrintZ(alloc, "{s}{s}", .{ home, path[len..] });
+    return try std.mem.concatWithSentinel(alloc, u8, &.{ home, path[len..] }, 0);
 }
+
+
+// Silly abstraction to read a file one line at a time. Only exists to help
+// with supporting both Zig 0.14 and 0.15, can be removed once 0.14 support is
+// dropped.
+pub const LineReader = if (@hasDecl(std.io, "bufferedReader")) struct {
+    rd: std.io.BufferedReader(4096, std.fs.File.Reader),
+    fbs: std.io.FixedBufferStream([]u8),
+
+    pub fn init(f: std.fs.File, buf: []u8) @This() {
+        return .{
+            .rd = std.io.bufferedReader(f.reader()),
+            .fbs = std.io.fixedBufferStream(buf),
+        };
+    }
+
+    pub fn read(s: *@This()) !?[]u8 {
+        s.fbs.reset();
+        s.rd.reader().streamUntilDelimiter(s.fbs.writer(), '\n', s.fbs.buffer.len) catch |err| switch (err) {
+            error.EndOfStream => if (s.fbs.getPos() catch unreachable == 0) return null,
+            else => |e| return e,
+        };
+        return s.fbs.getWritten();
+    }
+
+} else struct {
+    rd: std.fs.File.Reader,
+
+    pub fn init(f: std.fs.File, buf: []u8) @This() {
+        return .{ .rd = f.readerStreaming(buf) };
+    }
+
+    pub fn read(s: *@This()) !?[]u8 {
+        // Can't use takeDelimiter() because that's not available in 0.15.1,
+        // Can't use takeDelimiterExclusive() because that changed behavior in 0.15.2.
+        const r = &s.rd.interface;
+        const result = r.peekDelimiterInclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => {
+                const remaining = r.buffer[r.seek..r.end];
+                if (remaining.len == 0) return null;
+                r.toss(remaining.len);
+                return remaining;
+            },
+            else => |e| return e,
+        };
+        r.toss(result.len);
+        return result[0 .. result.len - 1];
+    }
+};

@@ -20,7 +20,7 @@ C version (1.x).
 
 ## Requirements
 
-- Zig 0.14
+- Zig 0.14 or 0.15
 - Some sort of POSIX-like OS
 - ncurses
 - libzstd

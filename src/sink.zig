@@ -140,20 +140,21 @@ pub const Dir = struct {
     }
 
     fn path(d: *Dir) [:0]u8 {
-        var components = std.ArrayList([]const u8).init(main.allocator);
-        defer components.deinit();
+        var components: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer components.deinit(main.allocator);
         var it: ?*Dir = d;
-        while (it) |e| : (it = e.parent) components.append(e.name) catch unreachable;
+        while (it) |e| : (it = e.parent) components.append(main.allocator, e.name) catch unreachable;
 
-        var out = std.ArrayList(u8).init(main.allocator);
+        var out: std.ArrayListUnmanaged(u8) = .empty;
         var i: usize = components.items.len-1;
         while (true) {
-            if (i != components.items.len-1 and !(out.items.len != 0 and out.items[out.items.len-1] == '/')) out.append('/') catch unreachable;
-            out.appendSlice(components.items[i]) catch unreachable;
+            if (i != components.items.len-1 and !(out.items.len != 0 and out.items[out.items.len-1] == '/'))
+                out.append(main.allocator, '/') catch unreachable;
+            out.appendSlice(main.allocator, components.items[i]) catch unreachable;
             if (i == 0) break;
             i -= 1;
         }
-        return out.toOwnedSliceSentinel(0) catch unreachable;
+        return out.toOwnedSliceSentinel(main.allocator, 0) catch unreachable;
     }
 
     fn ref(d: *Dir) void {
@@ -291,7 +292,7 @@ fn drawConsole() void {
         var ansi: ?bool = null;
         var lines_written: usize = 0;
     };
-    const stderr = std.io.getStdErr();
+    const stderr = if (@hasDecl(std.io, "getStdErr")) std.io.getStdErr() else std.fs.File.stderr();
     const ansi = st.ansi orelse blk: {
         const t = stderr.supportsAnsiEscapeCodes();
         st.ansi = t;
@@ -450,25 +451,28 @@ pub fn draw() void {
     switch (main.config.scan_ui.?) {
         .none => {},
         .line => drawConsole(),
-        .full => switch (global.state) {
-            .done => {},
-            .err => drawError(),
-            .zeroing => {
-                const box = ui.Box.create(4, ui.cols -| 5, "Initializing");
-                box.move(2, 2);
-                ui.addstr("Clearing directory counts...");
-            },
-            .hlcnt => {
-                const box = ui.Box.create(4, ui.cols -| 5, "Finalizing");
-                box.move(2, 2);
-                ui.addstr("Counting hardlinks... ");
-                if (model.inodes.add_total > 0) {
-                    ui.addnum(.default, model.inodes.add_done);
-                    ui.addstr(" / ");
-                    ui.addnum(.default, model.inodes.add_total);
-                }
-            },
-            .running => drawProgress(),
+        .full => {
+            ui.init();
+            switch (global.state) {
+                .done => {},
+                .err => drawError(),
+                .zeroing => {
+                    const box = ui.Box.create(4, ui.cols -| 5, "Initializing");
+                    box.move(2, 2);
+                    ui.addstr("Clearing directory counts...");
+                },
+                .hlcnt => {
+                    const box = ui.Box.create(4, ui.cols -| 5, "Finalizing");
+                    box.move(2, 2);
+                    ui.addstr("Counting hardlinks... ");
+                    if (model.inodes.add_total > 0) {
+                        ui.addnum(.default, model.inodes.add_done);
+                        ui.addstr(" / ");
+                        ui.addnum(.default, model.inodes.add_total);
+                    }
+                },
+                .running => drawProgress(),
+            }
         },
     }
 }

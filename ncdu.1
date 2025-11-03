@@ -1,6 +1,6 @@
 .\" SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 .\" SPDX-License-Identifier: MIT
-.Dd May 1, 2025
+.Dd August 16, 2025
 .Dt NCDU 1
 .Os
 .Sh NAME
@@ -44,6 +44,7 @@
 .Op Fl \-group\-directories\-first , \-no\-group\-directories\-first
 .Op Fl \-confirm\-quit , \-no\-confirm\-quit
 .Op Fl \-confirm\-delete , \-no\-confirm\-delete
+.Op Fl \-delete\-command Ar command
 .Op Fl \-color Ar off | dark | dark-bg
 .Op Ar path
 .Nm
@@ -359,6 +360,31 @@ Can be helpful when you accidentally press 'q' during or after a very long scan.
 Require a confirmation before deleting a file or directory.
 Enabled by default, but can be disabled if you're absolutely sure you won't
 accidentally press 'd'.
+.It Fl \-delete\-command Ar command
+When set to a non-empty string, replace the built-in file deletion feature with
+a custom shell command.
+.Pp
+The absolute path of the item to be deleted is appended to the given command
+and the result is evaluated in a shell.
+The command is run from the same directory that ncdu itself was started in.
+The
+.Ev NCDU_DELETE_PATH
+environment variable is set to the absolute path of the item to be deleted and
+.Ev NCDU_LEVEL
+is set in the same fashion as when spawning a shell from within ncdu.
+.Pp
+After command completion, the in-memory view of the selected item is refreshed
+and directory sizes are adjusted as necessary.
+This is not a full refresh of the complete directory tree, so if the item has
+been renamed or moved to another directory, it's new location is not
+automatically picked up.
+.Pp
+For example, to use
+.Xr rm 1
+interactive mode to prompt before each deletion:
+.Dl ncdu --no-confirm-delete --delete-command \[aq]rm -ri --\[aq]
+Or to move files to trash:
+.Dl ncdu --delete-command \[aq]gio trash --\[aq]
 .It Fl \-color Ar off | dark | dark-bg
 Set the color scheme.
 The following schemes are recognized:

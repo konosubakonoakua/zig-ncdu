@@ -504,7 +504,9 @@ pub fn import() void {
 pub fn open(fd: std.fs.File) !void {
     global.fd = fd;
 
-    const size = try fd.getEndPos();
+    // Do not use fd.getEndPos() because that requires newer kernels supporting statx() #261.
+    try fd.seekFromEnd(0);
+    const size = try fd.getPos();
     if (size < 16) return error.EndOfStream;
 
     // Read index block

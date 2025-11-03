@@ -17,8 +17,7 @@ pub var cols: u32 = undefined;
 
 pub fn die(comptime fmt: []const u8, args: anytype) noreturn {
     deinit();
-    const stderr = std.io.getStdErr();
-    stderr.writer().print(fmt, args) catch {};
+    std.debug.print(fmt, args);
     std.process.exit(1);
 }
 
@@ -26,6 +25,8 @@ pub fn quit() noreturn {
     deinit();
     std.process.exit(0);
 }
+
+const sleep = if (@hasDecl(std.time, "sleep")) std.time.sleep else std.Thread.sleep;
 
 // Should be called when malloc fails. Will show a message to the user, wait
 // for a second and return to give it another try.
@@ -41,14 +42,13 @@ pub fn oom() void {
     if (main_thread == std.Thread.getCurrentId()) {
         const haveui = inited;
         deinit();
-        const stderr = std.io.getStdErr();
-        stderr.writeAll("\x1b7\x1b[JOut of memory, trying again in 1 second. Hit Ctrl-C to abort.\x1b8") catch {};
-        std.time.sleep(std.time.ns_per_s);
+        std.debug.print("\x1b7\x1b[JOut of memory, trying again in 1 second. Hit Ctrl-C to abort.\x1b8", .{});
+        sleep(std.time.ns_per_s);
         if (haveui)
             init();
     } else {
         _ = oom_threads.fetchAdd(1, .monotonic);
-        std.time.sleep(std.time.ns_per_s);
+        sleep(std.time.ns_per_s);
         _ = oom_threads.fetchSub(1, .monotonic);
     }
 }
@@ -80,7 +80,7 @@ pub fn errorString(e: anyerror) [:0]const u8 {
     };
 }
 
-var to_utf8_buf = std.ArrayList(u8).init(main.allocator);
+var to_utf8_buf: std.ArrayListUnmanaged(u8) = .empty;
 
 fn toUtf8BadChar(ch: u8) bool {
     return switch (ch) {
@@ -107,19 +107,19 @@ pub fn toUtf8(in: [:0]const u8) [:0]const u8 {
         if (std.unicode.utf8ByteSequenceLength(in[i])) |cp_len| {
             if (!toUtf8BadChar(in[i]) and i + cp_len <= in.len) {
                 if (std.unicode.utf8Decode(in[i .. i + cp_len])) |_| {
-                    to_utf8_buf.appendSlice(in[i .. i + cp_len]) catch unreachable;
+                    to_utf8_buf.appendSlice(main.allocator, in[i .. i + cp_len]) catch unreachable;
                     i += cp_len;
                     continue;
                 } else |_| {}
             }
         } else |_| {}
-        to_utf8_buf.writer().print("\\x{X:0>2}", .{in[i]}) catch unreachable;
+        to_utf8_buf.writer(main.allocator).print("\\x{X:0>2}", .{in[i]}) catch unreachable;
         i += 1;
     }
-    return util.arrayListBufZ(&to_utf8_buf);
+    return util.arrayListBufZ(&to_utf8_buf, main.allocator);
 }
 
-var shorten_buf = std.ArrayList(u8).init(main.allocator);
+var shorten_buf: std.ArrayListUnmanaged(u8) = .empty;
 
 // Shorten the given string to fit in the given number of columns.
 // If the string is too long, only the prefix and suffix will be printed, with '...' in between.
@@ -150,8 +150,8 @@ pub fn shorten(in: [:0]const u8, max_width: u32) [:0] const u8 {
     if (total_width <= max_width) return in;
 
     shorten_buf.shrinkRetainingCapacity(0);
-    shorten_buf.appendSlice(in[0..prefix_end]) catch unreachable;
-    shorten_buf.appendSlice("...") catch unreachable;
+    shorten_buf.appendSlice(main.allocator, in[0..prefix_end]) catch unreachable;
+    shorten_buf.appendSlice(main.allocator, "...") catch unreachable;
 
     var start_width: u32 = prefix_width;
     var start_len: u32 = prefix_end;
@@ -163,11 +163,11 @@ pub fn shorten(in: [:0]const u8, max_width: u32) [:0] const u8 {
         start_width += cp_width;
         start_len += cp_len;
         if (total_width - start_width <= max_width - prefix_width - 3) {
-            shorten_buf.appendSlice(in[start_len..]) catch unreachable;
+            shorten_buf.appendSlice(main.allocator, in[start_len..]) catch unreachable;
             break;
         }
     }
-    return util.arrayListBufZ(&shorten_buf);
+    return util.arrayListBufZ(&shorten_buf, main.allocator);
 }
 
 fn shortenTest(in: [:0]const u8, max_width: u32, out: [:0]const u8) !void {
@@ -335,8 +335,7 @@ fn updateSize() void {
 fn clearScr() void {
     // Send a "clear from cursor to end of screen" instruction, to clear a
     // potential line left behind from scanning in -1 mode.
-    const stderr = std.io.getStdErr();
-    stderr.writeAll("\x1b[J") catch {};
+    std.debug.print("\x1b[J", .{});
 }
 
 pub fn init() void {
@@ -634,11 +633,58 @@ pub fn getch(block: bool) i32 {
         }
         if (ch == c.ERR) {
             if (!block) return 0;
-            std.time.sleep(10*std.time.ns_per_ms);
+            sleep(10*std.time.ns_per_ms);
             continue;
         }
         return ch;
     }
     die("Error reading keyboard input, assuming TTY has been lost.\n(Potentially nonsensical error message: {s})\n",
         .{ c.strerror(@intFromEnum(std.posix.errno(-1))) });
+}
+
+fn waitInput() void {
+    if (@hasDecl(std.io, "getStdIn")) {
+        std.io.getStdIn().reader().skipUntilDelimiterOrEof('\n') catch unreachable;
+    } else {
+        var buf: [512]u8 = undefined;
+        var rd = std.fs.File.stdin().reader(&buf);
+        _ = rd.interface.discardDelimiterExclusive('\n') catch unreachable;
+    }
+}
+
+pub fn runCmd(cmd: []const []const u8, cwd: ?[]const u8, env: *std.process.EnvMap, reporterr: bool) void {
+    deinit();
+    defer init();
+
+    // NCDU_LEVEL can only count to 9, keeps the implementation simple.
+    if (env.get("NCDU_LEVEL")) |l|
+        env.put("NCDU_LEVEL", if (l.len == 0) "1" else switch (l[0]) {
+            '0'...'8' => |d| &[1] u8{d+1},
+            '9' => "9",
+            else => "1"
+        }) catch unreachable
+    else
+        env.put("NCDU_LEVEL", "1") catch unreachable;
+
+    var child = std.process.Child.init(cmd, main.allocator);
+    child.cwd = cwd;
+    child.env_map = env;
+
+    const term = child.spawnAndWait() catch |e| blk: {
+        std.debug.print("Error running command: {s}\n\nPress enter to continue.\n", .{ ui.errorString(e) });
+        waitInput();
+        break :blk std.process.Child.Term{ .Exited = 0 };
+    };
+
+    const n = switch (term) {
+        .Exited  => "error",
+        .Signal  => "signal",
+        .Stopped => "stopped",
+        .Unknown => "unknown",
+    };
+    const v = switch (term) { inline else => |v| v };
+    if (term != .Exited or (reporterr and v != 0)) {
+        std.debug.print("\nCommand returned with {s} code {}.\nPress enter to continue.\n", .{ n, v });
+        waitInput();
+    }
 }

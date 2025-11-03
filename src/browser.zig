@@ -15,16 +15,16 @@ const util = @import("util.zig");
 // Currently opened directory.
 pub var dir_parent: *model.Dir = undefined;
 pub var dir_path: [:0]u8 = undefined;
-var dir_parents = std.ArrayList(model.Ref).init(main.allocator);
+var dir_parents: std.ArrayListUnmanaged(model.Ref) = .empty;
 var dir_alloc = std.heap.ArenaAllocator.init(main.allocator);
 
 // Used to keep track of which dir is which ref, so we can enter it.
 // Only used for binreader browsing.
-var dir_refs = std.ArrayList(struct { ptr: *model.Dir, ref: u64 }).init(main.allocator);
+var dir_refs: std.ArrayListUnmanaged(struct { ptr: *model.Dir, ref: u64 }) = .empty;
 
 // Sorted list of all items in the currently opened directory.
 // (first item may be null to indicate the "parent directory" item)
-var dir_items = std.ArrayList(?*model.Entry).init(main.allocator);
+var dir_items: std.ArrayListUnmanaged(?*model.Entry) = .empty;
 
 var dir_max_blocks: u64 = 0;
 var dir_max_size: u64 = 0;
@@ -146,7 +146,7 @@ pub fn loadDir(next_sel: u64) void {
     dir_has_shared = false;
 
     if (dir_parents.items.len > 1)
-        dir_items.append(null) catch unreachable;
+        dir_items.append(main.allocator, null) catch unreachable;
     var ref = dir_parent.sub;
     while (!ref.isNull()) {
         const e =
@@ -164,10 +164,10 @@ pub fn loadDir(next_sel: u64) void {
             break :blk !excl and name[0] != '.' and name[name.len-1] != '~';
         };
         if (shown) {
-            dir_items.append(e) catch unreachable;
+            dir_items.append(main.allocator, e) catch unreachable;
             if (e.dir()) |d| {
                 if (d.shared_blocks > 0 or d.shared_size > 0) dir_has_shared = true;
-                if (main.config.binreader) dir_refs.append(.{ .ptr = d, .ref = ref.ref }) catch unreachable;
+                if (main.config.binreader) dir_refs.append(main.allocator, .{ .ptr = d, .ref = ref.ref }) catch unreachable;
             }
         }
 
@@ -185,10 +185,10 @@ pub fn initRoot() void {
     if (main.config.binreader) {
         const ref = bin_reader.getRoot();
         dir_parent = bin_reader.get(ref, main.allocator).dir() orelse ui.die("Invalid import\n", .{});
-        dir_parents.append(.{ .ref = ref }) catch unreachable;
+        dir_parents.append(main.allocator, .{ .ref = ref }) catch unreachable;
     } else {
         dir_parent = model.root;
-        dir_parents.append(.{ .ptr = &dir_parent.entry }) catch unreachable;
+        dir_parents.append(main.allocator, .{ .ptr = &dir_parent.entry }) catch unreachable;
     }
     dir_path = main.allocator.dupeZ(u8, dir_parent.entry.name()) catch unreachable;
     loadDir(0);
@@ -202,10 +202,10 @@ fn enterSub(e: *model.Dir) void {
         };
         dir_parent.entry.destroy(main.allocator);
         dir_parent = bin_reader.get(ref, main.allocator).dir() orelse unreachable;
-        dir_parents.append(.{ .ref = ref }) catch unreachable;
+        dir_parents.append(main.allocator, .{ .ref = ref }) catch unreachable;
     } else {
         dir_parent = e;
-        dir_parents.append(.{ .ptr = &e.entry }) catch unreachable;
+        dir_parents.append(main.allocator, .{ .ptr = &e.entry }) catch unreachable;
     }
 
     const newpath = std.fs.path.joinZ(main.allocator, &[_][]const u8{ dir_path, e.entry.name() }) catch unreachable;
@@ -430,7 +430,7 @@ const info = struct {
 
     var tab: Tab = .info;
     var entry: ?*model.Entry = null;
-    var links: ?std.ArrayList(*model.Link) = null;
+    var links: ?std.ArrayListUnmanaged(*model.Link) = null;
     var links_top: usize = 0;
     var links_idx: usize = 0;
 
@@ -445,7 +445,7 @@ const info = struct {
     // Set the displayed entry to the currently selected item and open the tab.
     fn set(e: ?*model.Entry, t: Tab) void {
         if (e != entry) {
-            if (links) |*l| l.deinit();
+            if (links) |*l| l.deinit(main.allocator);
             links = null;
             links_top = 0;
             links_idx = 0;
@@ -458,10 +458,10 @@ const info = struct {
         state = .info;
         tab = t;
         if (tab == .links and links == null and !main.config.binreader) {
-            var list = std.ArrayList(*model.Link).init(main.allocator);
+            var list: std.ArrayListUnmanaged(*model.Link) = .empty;
             var l = e.?.link().?;
             while (true) {
-                list.append(l) catch unreachable;
+                list.append(main.allocator, l) catch unreachable;
                 l = l.next;
                 if (&l.entry == e)
                     break;
